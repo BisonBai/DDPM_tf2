@@ -15,7 +15,10 @@ num_epochs = 100  # train for at least 100 epochs for good results
 image_size = 64
 DEFAULT_DTYPE = tf.float32
 image_save_file = './result'
-interpolated_dir = '/content/drive/My Drive/diffusion model/diffusion model/interpolate'
+interpolated_dir = '/content/drive/My Drive/interpolation/interpolated_images'
+interpolated_trace_dir = '/content/drive/My Drive/interpolation/interpolation_trace'
+#interpolated_dir = './interpolated_images' #if testing in local directory
+#interpolated_trace_dir = './interpolation_trace' #if testing in local directory
 batch_size = 64
 
 # KID = Kernel Inception Distance
@@ -73,6 +76,12 @@ def interpolate(image1_latent, image2_latent, interpolationFactor):
     interpolated = (1 - interpolationFactor) * image1_latent + interpolationFactor * image2_latent
 
     return interpolated
+
+def plotSingleImage(image, fileName):
+    plt.imshow(image)
+    plt.savefig(fileName)
+    plt.show()
+    plt.close()
 
 class KID(keras.metrics.Metric):
     def __init__(self, name, **kwargs):
@@ -349,7 +358,7 @@ class DiffusionModel(keras.Model):
             plt.show()
             plt.close()
 
-    def generateByInterpolation(self, images):
+    def generateByInterpolation(self, images, trace=False):
         # normalize images to have standard deviation of 1, like the noises
         images = self.normalizer(images, training=False)
         noises = tf.random.normal(shape=(images.shape[0], self.image_size, self.image_size, 3))
