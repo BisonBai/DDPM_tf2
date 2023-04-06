@@ -7,19 +7,36 @@ from unet_clonable import *
 import math
 import numpy as np
 import matplotlib.pyplot as plt
+import tensorflow_probability as tfp
+
+
+from numpy import cov
+from numpy import trace
+from numpy import iscomplexobj
+from numpy import asarray
+from numpy.random import randint
+from scipy.linalg import sqrtm
+from keras.applications.inception_v3 import InceptionV3
+from keras.applications.inception_v3 import preprocess_input
+from skimage.transform import resize
+from tensorflow.keras.backend import eval
 
 # data
 dataset_name = "oxford_flowers102"
+#dataset_name = 'tf_flowers'
+#dataset_name = 'cifar10'
+#dataset_name = 'cars196'
+
 dataset_repetitions = 5
-num_epochs = 100  # train for at least 100 epochs for good results
-image_size = 64
+num_epochs = 100  # train for at least 100 epochs for good results 
+image_size = 64   ## for cifar10 , change the image size to 32 
 DEFAULT_DTYPE = tf.float32
 image_save_file = './result'
 interpolated_dir = '/content/drive/My Drive/interpolation/interpolated_images'
 interpolated_trace_dir = '/content/drive/My Drive/interpolation/interpolation_trace'
 #interpolated_dir = './interpolated_images' #if testing in local directory
 #interpolated_trace_dir = './interpolation_trace' #if testing in local directory
-batch_size = 64
+batch_size = 64 ## change to 128 for cifar10
 
 # KID = Kernel Inception Distance
 kid_image_size = 75
@@ -83,6 +100,82 @@ def plotSingleImage(image, fileName):
     plt.savefig(fileName)
     plt.show()
     plt.close()
+
+class FID(keras.metrics.Metric):
+    def __init__(self, name, **kwargs):
+        super().__init__(name=name, **kwargs)
+
+        # FID is estimated per batch and is averaged across batches
+        self.fid_tracker = keras.metrics.Mean(name="fid_tracker")
+        self.model_i = InceptionV3(include_top=False, pooling='avg', input_shape=(299,299,3))
+    
+    def result(self):
+        return self.fid_tracker.result()
+
+    def reset_state(self):
+        self.fid_tracker.reset_state()
+        
+     # calculate frechet inception distance
+    def update_state(self, images1, images2):
+ 
+        # resize images
+        images1 = tf.image.resize(images1, (299,299) , method = 'nearest')
+        images2 = tf.image.resize(images2, (299,299), method = 'nearest')
+        # pre-process images
+        images1 = preprocess_input(images1)
+        images2 = preprocess_input(images2)
+        
+    # calculate activations
+        act1 = self.model_i(images1)
+        act2 = self.model_i(images2)
+        
+        #mu1, sigma1 = act1.mean(axis=0), cov(act1, rowvar=False)
+        #mu2, sigma2 = act2.mean(axis=0), cov(act2, rowvar=False)
+        # calculate sum squared difference between means        
+        #ssdiff = np.sum((mu1 - mu2)**2.0)
+        # calculate sqrt of product between cov
+        #covmean = sqrtm(sigma1.dot(sigma2))
+        # check and correct imaginary numbers from sqrt
+        #if iscomplexobj(covmean):
+            #covmean = covmean.real
+        # calculate score
+        #fid = ssdiff + trace(sigma1 + sigma2 - 2.0 * covmean)
+        
+        ## above code needs to be changed for tensorflow as below
+        
+        
+        # calculate mean and covariance statistics
+        mu1 = tf.math.reduce_mean(act1 , axis =0 ) ## 2048,
+        mu2 = tf.math.reduce_mean(act2, axis =0 )  ## 2048,
+        
+        
+        
+        ##
+        sigma1 = tfp.stats.covariance(act1)  ## 2048 x 2048 
+        sigma2 = tfp.stats.covariance(act2)  ## 2048 x 2048 
+        
+        
+        
+        ssdiff = tf.math.reduce_sum(tf.math.square(tf.math.subtract(mu1, mu2))) ## this is ok . single value 
+        
+
+        covmean =  tf.math.sqrt(tf.tensordot(sigma1, sigma2 , 1)) ## has NaN values 
+        
+        covmean = tf.math.real(covmean) ## this has some nan 2048 x 2048
+        
+
+        sigma_sum = tf.math.add(sigma1 , sigma2 )   ## 2048 x 2048 
+        
+        
+        prod = tf.math.add(sigma_sum , tf.math.multiply(-2.0, covmean)) ## 2048 x 2048 (contains some nan)
+        
+        
+        fid = tf.math.add(ssdiff , tf.linalg.trace(prod)) ## getting nan ..linalg giving nan
+        
+        
+        # update the average FID estimate
+        self.fid_tracker.update_state(fid)
+        #return fid
 
 class KID(keras.metrics.Metric):
     def __init__(self, name, **kwargs):
@@ -174,9 +267,11 @@ class DiffusionModel(keras.Model):
         self.noise_loss_tracker = keras.metrics.Mean(name="n_loss")
         self.image_loss_tracker = keras.metrics.Mean(name="i_loss")
         self.kid = KID(name="kid")  # Kernel inception distance, image quality metric, simpler to implement than FID
+        #self.fid = FID(name = "fid") ## 
 
     @property
     def metrics(self):
+        #return [self.noise_loss_tracker, self.image_loss_tracker, self.kid , self.fid] 
         return [self.noise_loss_tracker, self.image_loss_tracker, self.kid]
 
     def denormalize(self, images):
@@ -226,7 +321,7 @@ class DiffusionModel(keras.Model):
 
         return pred_noises, pred_images
 
-    def reverse_diffusion(self, initial_noise, diffusion_steps):
+    def reverse_diffusion(self, initial_noise, diffusion_steps , gen_plot):
         """
         Reverse diffusion (sampling)
         Slightly different implementation from the original one.
@@ -234,14 +329,32 @@ class DiffusionModel(keras.Model):
         num_images = initial_noise.shape[0]  # batch size
 
         next_noisy_images = initial_noise
+        
+        sr =[]
+        nr = []
+        d_step =[]
+        predicted_noise = []
+        
         for step in range(diffusion_steps, 0, -1):  # t = T,...,1
+            
             noisy_images = next_noisy_images
 
             # separate the current noisy image to its components: noise zt and denoised image x0
             diffusion_times = tf.fill(dims=(num_images,), value=step)  # timestep t
+            
             noise_rates, signal_rates = self.diffusion_schedule(diffusion_times)  # get corresponding weights at t
+            
             pred_noises, pred_images = self.denoise(
-                noisy_images, diffusion_times, noise_rates, signal_rates, training=False)  # get predicted zt, x0
+            noisy_images, diffusion_times, noise_rates, signal_rates, training=False) 
+            
+            ####
+            nr.append(tf.math.reduce_mean(noise_rates).numpy())
+            sr.append(tf.math.reduce_mean(signal_rates).numpy())
+            d_step.append(step) 
+            predicted_noise.append(tf.math.reduce_mean(pred_noises).numpy())
+            ####
+            
+            # get predicted zt, x0
             beta_t = tf.reshape(tf.gather(self.betas, diffusion_times), (-1, 1, 1, 1))
             sqrt_alpha_t = tf.reshape(tf.gather(self.alphas, diffusion_times), (-1, 1, 1, 1))**0.5
             alpha_cumprod_t = tf.reshape(tf.gather(self.alphas_cumprod, diffusion_times), (-1, 1, 1, 1))
@@ -252,16 +365,32 @@ class DiffusionModel(keras.Model):
             noise = tf.random.normal(shape=next_noisy_images.shape, dtype=next_noisy_images.dtype)
             posterior_var = tf.reshape(tf.gather(self.posterior_var, diffusion_times), (-1, 1, 1, 1))
             next_noisy_images = next_noisy_images + posterior_var**0.5 * noise
-
+            ##
+            
+        ###    
+        
+        if gen_plot:
+            
+            plt.figure(figsize =(10,5))
+            plt.plot(d_step ,sr,  label ="signal rate")
+            plt.title(" Mean Signal Rate Vs Diffusion step")
+            plt.figure(figsize =(10,5))
+            plt.plot(d_step ,nr,  label ="noise rate")
+            plt.title(" Mean Noise Rate Vs Diffusion step")
+            plt.figure(figsize =(10,5))
+            plt.plot(d_step ,predicted_noise,  label ="predicted noise ")
+            plt.title(" Mean Predicted noise Vs Diffusion step")
+        ###
+                   
         return pred_images  # predicted x0 from noisy image x1
 
 
 
-    def generate(self, num_images, diffusion_steps, initial_noise=None):
+    def generate(self, num_images, diffusion_steps,  gen_plot , initial_noise=None ):
         # initla noise (pure noise or conditional) -> images -> denormalized images
         if not initial_noise:
             initial_noise = tf.random.normal(shape=(num_images, self.image_size, self.image_size, 3))  # pure noise
-        generated_images = self.reverse_diffusion(initial_noise, diffusion_steps)
+        generated_images = self.reverse_diffusion(initial_noise, diffusion_steps , gen_plot )
         generated_images = self.denormalize(generated_images)
         return generated_images
 
@@ -300,7 +429,7 @@ class DiffusionModel(keras.Model):
             ema_weight.assign(ema * ema_weight + (1 - ema) * weight)
 
         # KID is not measured during the training phase for computational efficiency
-        return {m.name: m.result() for m in self.metrics[:-1]}
+        return {m.name: m.result() for m in self.metrics[:-1]} ## 3/4 V
 
     def test_step(self, images):
         """similar to train step, but doesn't update weights but output extra KID to compare real and generated image"""
@@ -329,23 +458,26 @@ class DiffusionModel(keras.Model):
 
         # measure KID between real and generated images
         # computationally demanding, kid_diffusion_steps has to be small
+        
         images = self.denormalize(images)
         generated_images = self.generate(
-            num_images=batch_size, diffusion_steps=kid_diffusion_steps, initial_noise=None
+            num_images=batch_size, diffusion_steps=kid_diffusion_steps, gen_plot =False , initial_noise=None  
         )
         self.kid.update_state(images, generated_images)
-
+        #self.fid.update_state(images1 = images, images2= generated_images)
+        
+        
         return {m.name: m.result() for m in self.metrics}
 
     def plot_images(self, epoch=None, logs=None, plot_diffusion_steps = None, \
-                    image_save_file=image_save_file, num_rows=3, num_cols=6):
+                    image_save_file=image_save_file, num_rows=3, num_cols=6 , gen_plot = False):
         if epoch % 10 == 0:
             # plot random generated images for visual evaluation of generation quality
             if plot_diffusion_steps == None:
                 plot_diffusion_steps = self.plot_diffusion_steps
             generated_images = self.generate(
                 num_images=num_rows * num_cols,
-                diffusion_steps=plot_diffusion_steps,
+                diffusion_steps=plot_diffusion_steps , gen_plot = gen_plot
             )
             plt.figure(figsize=(num_cols * 2.0, num_rows * 2.0))
             for row in range(num_rows):
