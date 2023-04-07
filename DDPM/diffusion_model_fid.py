@@ -1,3 +1,6 @@
+'''
+This file has some bugs. It's better to use diffusion_model.py
+'''
 import tensorflow as tf
 import tensorflow_addons as tfa
 import tensorflow_datasets as tfds
