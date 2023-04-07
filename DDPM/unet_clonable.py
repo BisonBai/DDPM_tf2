@@ -1,3 +1,7 @@
+'''
+This file implements the same as unet.py only using different format to build keras model.
+This format can be cloned by tf.keras.models.clone_model, although we don't use this function.
+'''
 import matplotlib.pyplot as plt
 import tensorflow as tf
 import tensorflow_addons as tfa
